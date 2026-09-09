@@ -1,0 +1,4 @@
+# Only main.go and go.mod are needed by the build.
+*
+!go.mod
+!main.go

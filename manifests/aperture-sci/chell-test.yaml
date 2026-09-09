@@ -1,0 +1,81 @@
+# chell-test — the "weighted companion pod" (prose alias only; the real object
+# is named chell-test). Deliberately a FAT image (nicolaka/netshoot): it ships a
+# shell, curl, wget, grep — everything Chambers 01–04 poke at. The container does
+# exactly one thing on its own: a curl loop to $BASELINE_TARGET_URL every
+# $BASELINE_INTERVAL_SECONDS, so NeuVector learns a tight process+network
+# baseline during Discover.
+#
+# Rendered with envsubst by Scripts/30_deploy_apps.sh — every ${VAR} comes from
+# env.sh. Do not hard-code image refs, namespaces, or test parameters here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chell-test
+  namespace: ${NS_SCI}
+  labels:
+    app: chell-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chell-test
+  template:
+    metadata:
+      labels:
+        app: chell-test
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: chell-test
+          image: ${CLEAN_APP_IMAGE}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
+          env:
+            - name: BASELINE_TARGET_URL
+              value: "${BASELINE_TARGET_URL}"
+            - name: BASELINE_INTERVAL_SECONDS
+              value: "${BASELINE_INTERVAL_SECONDS}"
+          # The known-good baseline: validate TLS to the target and print its
+          # SubjectAltName every cycle. One process (curl), one destination.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "chell-test baseline loop -> ${BASELINE_TARGET_URL} every ${BASELINE_INTERVAL_SECONDS}s"
+              while true; do
+                curl -svo /dev/null "${BASELINE_TARGET_URL}" 2>&1 \
+                  | grep --line-buffered subjectAltName || true
+                sleep "${BASELINE_INTERVAL_SECONDS}"
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+# chell-test has no listener of its own (netshoot only makes outbound calls), so
+# this Service has no endpoints. It exists purely to give the workload a named
+# Service entry in the NeuVector Network Activity graph, which the walkthroughs
+# refer to ("click on the chell-test service"). Safe to delete if you don't want
+# the empty Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: chell-test
+  namespace: ${NS_SCI}
+  labels:
+    app: chell-test
+spec:
+  selector:
+    app: chell-test
+  ports:
+    - name: placeholder
+      port: 80
+      targetPort: 80

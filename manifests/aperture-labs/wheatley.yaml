@@ -1,0 +1,78 @@
+# wheatley — the distroless app (Chamber 05). A single static Go binary on
+# gcr.io/distroless/static-debian12:nonroot: no shell, no package manager, no
+# coreutils. Serves HTTP on :8080 and makes no outbound connections, so the
+# learned baseline is minimal and every attack step is obviously anomalous.
+#
+# No shareProcessNamespace, no debug sidecar — the pod is exactly as minimal as
+# it looks. The Chamber 05 foothold (kubectl debug --target=wheatley) works
+# *because* Kubernetes provides that side door, not because the image cooperates.
+#
+# Rendered with envsubst by Scripts/31_deploy_distroless.sh — every ${VAR} comes
+# from env.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wheatley
+  namespace: ${NS_LABS}
+  labels:
+    app: wheatley
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wheatley
+  template:
+    metadata:
+      labels:
+        app: wheatley
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wheatley
+          image: ${DISTROLESS_APP_IMAGE}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wheatley
+  namespace: ${NS_LABS}
+  labels:
+    app: wheatley
+spec:
+  selector:
+    app: wheatley
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

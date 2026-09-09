@@ -1,0 +1,20 @@
+# Demo namespaces. Rendered with envsubst by the deploy scripts so the names
+# stay driven by env.sh (NS_SCI / NS_LABS).
+#
+#   ${NS_SCI}  — fat-image demo   (chell-test / "the weighted companion pod")
+#   ${NS_LABS} — distroless demo  (wheatley)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NS_SCI}
+  labels:
+    app.kubernetes.io/part-of: aperture-container-enrichment-center
+    aperture.chamber: fat-image
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NS_LABS}
+  labels:
+    app.kubernetes.io/part-of: aperture-container-enrichment-center
+    aperture.chamber: distroless

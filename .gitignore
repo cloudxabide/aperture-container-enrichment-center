@@ -1,0 +1,8 @@
+# Local, per-environment config — may contain a registry path or credentials.
+env.sh
+*.local
+*.local.*
+
+# Editor / OS noise
+.DS_Store
+*.swp

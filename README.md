@@ -6,5 +6,7 @@ This is a demo of deploying NeuVector on Rancher Desktop and running through som
 
 
 # Alternate Repo Names
-neu-sheriff-in-town
-whats-your-vector-victor
+
+Not sure where I will land for a name for this demo
+- neu-sheriff-in-town  
+- whats-your-vector-victor

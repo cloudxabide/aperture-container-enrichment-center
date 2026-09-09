@@ -1,240 +1,297 @@
-# SUSE Security (NeuVector) Demo Walkthrough: Monitor → Protect Mode
+# SUSE Security (NeuVector) Walkthrough — Fat Image (`chell-test`)
 
 ## Status
-This demo guide is still a work in progress.  Technically everything works - still need to build the order of operations and "tighten up" what you click on, and what you will see for names, etc..
 
-TODO: ensure the path demonstrates the capability in way that is easy to recognize
+Reconciled against [`PLAN.md`](./PLAN.md) chambers 00–04 and 06, and against the
+built `Scripts/` and `manifests/`. Commands use the real object names
+(`chell-test`, `aperture-sci`, group `nv.chell-test.aperture-sci`); the GLaDOS
+names are prose only (see [`00-glossary.md`](./00-glossary.md)).
 
+**Live-test TODO (NeuVector 5.4.x):**
+
+- Confirm the exact console wording for the **Rewrite Rule** dialog and for the
+  "implicit deny rule was violated" event.
+- Confirm whether an `exec`'d `/bin/bash` is SIGKILLed as well as `/bin/sh` — it
+  depends on how the Enforcer scopes the container's entrypoint process (the
+  workload's own command is `/bin/bash -c …`, so `bash` is in the baseline).
+
+---
 
 ## Overview
 
-This walkthrough guides you through a live demonstration of SUSE Security (NeuVector) using a running container in the `aperture-sci` namespace. You'll observe network behavior in Monitor mode, then flip to Protect mode and witness real-time enforcement blocking unauthorized connections.
+This is the **fat-image** track. The workload is `chell-test` —
+`nicolaka/netshoot`, a container that ships a shell, `curl`, `wget`, and `grep`
+— running in namespace `aperture-sci`. On its own it does exactly one thing: a
+`curl` loop to `www.fastly.com` every 5 seconds. That tight, single-process,
+single-destination behaviour is what makes every attack step below obviously
+anomalous.
+
+Companion tracks:
+
+- [`Security_Demo_Distroless.md`](./Security_Demo_Distroless.md) — Chamber 05,
+  the shell-less `wheatley` workload.
+- [`Security_Discussion.md`](./Security_Discussion.md) — the threat-model
+  narrative behind both.
+
+| Part | Chamber | Proves ([`PLAN.md`](./PLAN.md) §1) |
+|------|---------|------------------------------------|
+| The Setup + Part 1 | 00 — Discover | **B** — a behavioural baseline is learned with zero app changes |
+| Part 2 | 01 — The Weighted Companion Pod | **B** — graduated rollout; learned traffic is unaffected by enforcement |
+| Part 3 | 02 — The Combustible Lemon | **A, C** — enforcement is behavioural, process-level, and inside the pod |
+| Part 4 | 03 — Domain Block | **D, E** — policy is decoupled from the workload; L7 FQDN egress control |
+| Part 5 | 04 — WAF / Layer 7 | **E** — payload inspection inside an already-allowed connection |
+| Part 6 | 06 — Closing the loop | **G** — full audit trail |
 
 ---
 
 ## The Setup
 
-Before you begin, confirm the test container is running and active. The `chell-test` container in the `aperture-sci` namespace is continuously making outbound HTTPS requests every 5 seconds:
+Complete [`10-setup.md`](./10-setup.md) first. By the time you start this
+walkthrough:
 
-See [Scripts/30_deploy_apps.sh](../Scripts/30_deploy_apps.sh) for deploying the simple container for this demo.
+```bash
+Scripts/00_preflight.sh
+Scripts/10_install_neuvector.sh
+Scripts/20_expose_console.sh    # leave running, or background it
+Scripts/30_deploy_apps.sh
+```
+
+have all run, and:
 
 ```bash
 kubectl get pods -n aperture-sci
 ```
-
-You should see `chell-test` in a `Running` state. Internally, it's executing this loop:
-
-```bash
-curl -svo /dev/null https://www.fastly.com 2>&1 | grep subjectAltName
+```
+NAME                          READY   STATUS    RESTARTS   AGE
+chell-test-6b9c8d4f7c-abcde   1/1     Running   0          3m
 ```
 
-This curl call validates the TLS certificate on `www.fastly.com` and prints the Subject Alternative Name — confirming both DNS resolution and TLS negotiation are succeeding. This is your **known-good baseline traffic**.
-
----
-
-## Part 1: Observing Traffic in Monitor Mode
-
-### Step 1 — Log into the NeuVector Console
-
-Navigate to your NeuVector management UI. From the left sidebar, go to:
-
-**Network Activity** → you should see a live network graph populating with your cluster's workloads.
-
-> 💡 **Tip for the audience:** NeuVector is watching every network connection at Layer 7 — not just IP/port, but protocol and payload. Everything happening right now is being recorded.
-
-### Step 2 — Locate the `chell-test` Container
-
-In the Network Activity view, find the `aperture-sci` namespace grouping. Click on the `chell-test` service/pod. You should see:
-
-- An **outbound HTTPS connection** being established every ~5 seconds to `www.fastly.com`
-- NeuVector recording the destination, protocol (HTTPS/443), and connection frequency
-
-This traffic appears in **green** or as an allowed/observed connection — because NeuVector is currently in **Monitor mode**, which means it's *learning* and *alerting*, but **not blocking** anything.
-
-### Step 3 — Review the Learned Network Rules
-
-Navigate to **Policy** → **Network Rules** and filter to the `aperture-sci` namespace.
-
-You should see NeuVector has auto-discovered and documented:
-
-- **Source:** `nv.chell-test.aperture-sci` (aperture-sci namespace)
-- **Destination:** `(external)`
-- **Applications:** SSL **Ports** ANy
-
-> 🎯 **Key talking point:** This is NeuVector's *behavioral baseline*. In Monitor mode, it's building a model of "what normal looks like" for this workload. Every connection gets catalogued. When you switch to Protect mode, anything that deviates from this baseline becomes a candidate for enforcement.
-
-### Step 4 — Observe the Live Security Events
-
-Go to **Notifications** → **Security Events**. You may see informational events being logged for the outbound connections. Notice that in Monitor mode, these are recorded but the traffic flows freely.  At this point, however, we will see no notifications for our chell-test workload
-
-> 🎯 **Key talking point:** Your security team gets visibility without disrupting the application. This is how you build confidence before enforcing — you watch first, then act.
-
----
-
-## Part 2: Switching to Protect Mode
-
-### Step 5 — Change the Group Policy to Protect Mode
-
-Navigate to **Policy** → **Groups**. Find the group corresponding to `chell-test` in the `aperture-sci` namespace (it may appear as `nv.chell-test.aperture-sci` or similar).
-
-Click on the group, then look for the **Policy Mode** setting. You'll see three options:
-
-| Mode | Behavior |
-|------|----------|
-| **Discover** | Learning only — no alerts, no blocks |
-| **Monitor** | Alert on violations — no blocks |
-| **Protect** | Enforce — violations are **blocked** |
-
-Select **Protect** and confirm. The change takes effect immediately — NeuVector's enforcement engine now has an active ruleset for this workload.
-
-> 🎯 **Key talking point:** This is a per-group, per-workload control. You can have some services in Discover, others in Monitor, and production-critical workloads in Protect — all simultaneously. Granularity is the point.
-
-### Step 6 — Verify the Legitimate Traffic Still Flows
-
-Give it 10–15 seconds. The `chell-test` container's existing curl loop to `www.fastly.com` should **continue to work** because NeuVector learned that connection during the Monitor phase and it is now part of the allowlist.
-
-You can verify by watching the logs:
+The container is running this loop (from
+[`manifests/aperture-sci/chell-test.yaml`](../manifests/aperture-sci/chell-test.yaml)):
 
 ```bash
-kubectl logs -f $(kubectl get pods -n aperture-sci -o custom-columns=":metadata.name" --no-headers) -n aperture-sci
+curl -svo /dev/null "https://www.fastly.com" 2>&1 | grep subjectAltName
 ```
 
-You should continue to see output like:
+Watch it:
 
+```bash
+kubectl logs -f -n aperture-sci deploy/chell-test
+```
 ```
 *  subjectAltName: host "www.fastly.com" matched cert's "*.fastly.com"
 ```
 
-> 🎯 **Key talking point:** Legitimate, learned traffic is unaffected. NeuVector enforces *zero-trust* — not *zero-connectivity*. The model is "deny everything not explicitly allowed," but the allowlist was built automatically from observed behavior.
+This validates DNS resolution and the TLS handshake to Fastly every cycle. It is
+your **known-good baseline traffic**.
+
+Open the console (**https://localhost:8443**, `admin` / `admin`).
 
 ---
 
-## Part 3: Demonstrating Enforcement (Protect Mode in Action)
+## Part 1 — Chamber 00: Discover — establish the baseline
 
-### Step 7 — Exec into the Container
+### Step 1 — Watch the traffic being learned
 
-Now you'll attempt connections that were never part of the learned baseline.
+**Network Activity** → find the `aperture-sci` grouping → click `chell-test`.
+You should see an **outbound HTTPS connection to `www.fastly.com`** re-drawn
+every ~5 seconds, with the destination, protocol (SSL/443), and frequency
+recorded.
+
+> 💡 **Tip for the audience:** NeuVector is watching every connection at Layer 7
+> — not just IP/port, but protocol and payload. Nothing is being blocked yet.
+
+### Step 2 — Find the group and confirm it is in Discover
+
+**Policy → Groups** → `nv.chell-test.aperture-sci`. New groups start in
+**Discover**. Leave it there for **at least 5 minutes** so the baseline is
+solid before you enforce anything.
+
+### Step 3 — Review the auto-discovered rules
+
+**Policy → Network Rules**, filtered to `aperture-sci`:
+
+| Field | Value |
+|-------|-------|
+| **From** | `nv.chell-test.aperture-sci` |
+| **To** | `external` |
+| **Applications** | `SSL` |
+| **Ports** | any |
+
+**Policy → Groups → `nv.chell-test.aperture-sci` → Process Profile Rules** shows
+the learned processes: `bash`, `curl`, `grep`, `sleep`.
+
+> 🎯 **Key talking point:** This is the behavioural baseline — "what normal looks
+> like" for this one workload, built automatically from observed behaviour, with
+> zero changes to the app or its manifest. Everything outside it becomes a
+> candidate for enforcement the moment you switch to Protect.
+
+---
+
+## Part 2 — Chamber 01: The Weighted Companion Pod (Monitor → Protect)
+
+*The clean app, the fat image — enforcement turned on, nothing breaks.*
+
+### Step 4 — Move the group to Monitor and re-check the rules
+
+**Policy → Groups → `nv.chell-test.aperture-sci` → Policy Mode → Monitor.**
+
+| Mode | Behaviour |
+|------|-----------|
+| **Discover** | Learn only — no alerts, no blocks |
+| **Monitor** | Alert on anything off-baseline — still no blocks |
+| **Protect** | Enforce — off-baseline connections dropped, off-baseline processes SIGKILLed |
+
+Give it a minute. **Notifications → Security Events** stays quiet for
+`chell-test` — the loop is entirely within the baseline.
+
+### Step 5 — Switch to Protect
+
+**Policy Mode → Protect → confirm.** Enforcement is active immediately; no
+restart.
+
+> 🎯 **Key talking point:** This is a per-group dial. `chell-test` can be in
+> Protect while every other workload in the cluster stays in Discover or
+> Monitor. Granularity is the point.
+
+### Step 6 — Confirm the legitimate traffic still flows
 
 ```bash
-kubectl exec -it $(kubectl get pods -n aperture-sci -o custom-columns=":metadata.name" --no-headers) -n aperture-sci -- /bin/sh
+kubectl logs -f -n aperture-sci deploy/chell-test
 ```
-And you will see
 ```
-~ # command terminated with exit code 137
+*  subjectAltName: host "www.fastly.com" matched cert's "*.fastly.com"
 ```
 
-Hmmm... let's try /bin/bash
+Still ticking every ~5 seconds. The `curl → fastly:443` connection was learned
+during Discover, so Protect allows it.
+
+> 🎯 **Key talking point:** Zero-trust, not zero-connectivity. The model is "deny
+> everything not explicitly allowed" — but the allow-list was built for you from
+> real behaviour. Learned traffic is untouched by enforcement.
+
+---
+
+## Part 3 — Chamber 02: The Combustible Lemon (attacking in Protect)
+
+*The same pod, now with an attacker `exec`'d in. The group stays in Protect
+throughout this Part.*
+
+Each attempt below is a **single `kubectl exec`**, so you can run them one at a
+time and narrate. `Scripts/40_attack_fat.sh` fires the same sequence on a timer
+if you would rather not type live.
+
+### Step 7 — Spawn a shell → killed
+
+```bash
+kubectl exec -it -n aperture-sci deploy/chell-test -- /bin/sh
 ```
-kubectl exec -it $(kubectl get pods -n aperture-sci -o custom-columns=":metadata.name" --no-headers) -n aperture-sci -- /bin/bash
+```
 command terminated with exit code 137
 ```
 
-This is actually expected.  Browse to Notifications | Security Events
+`sh` is not in the process profile, so the Enforcer SIGKILLs it (`137` = 128 +
+SIGKILL). Try `/bin/bash` too — see the Status note about whether the entrypoint
+`bash` is distinguished from an interactive one.
 
-You should now see a few entries - 1 for /bin/sh and 1 for /bin/bash.  Click on "Rewrite Rule" - the dialogue presents a warning with a red background.  Review the warning and then click "Deploy"
+**Notifications → Security Events** → one entry per attempt: *Process profile
+rule violation by process "sh"*.
 
-And... let's try again to get a shell
-```
-kubectl exec -it $(kubectl get pods -n aperture-sci -o custom-columns=":metadata.name" --no-headers) -n aperture-sci -- /bin/sh
-~ #
-```
+> 🎯 **Key talking point:** The attacker's first move — get a shell — fails
+> before it runs a single command. Not a signature match; the process simply
+> isn't part of what this workload does.
 
-Huzzah!  You should get a shell prompt inside the container.
-
-### Step 8 — Attempt an Unauthorized Connection (curl to google.com)
-
-From inside the container, run:
+### Step 8 — `curl` to an unlearned destination → blocked (network rule)
 
 ```bash
-curl google.com
+kubectl exec -n aperture-sci deploy/chell-test -- curl -sS --max-time 5 http://google.com
+```
+```
+curl: (28) Connection timed out after 5001 milliseconds
 ```
 
-**Expected result:** The connection is **blocked**. You'll see either a connection timeout, connection refused, or an immediate failure — NeuVector's enforcement engine drops the packet before it leaves the container's network namespace.
+`curl` *is* in the baseline (the loop uses it), but `google.com` was never a
+learned destination, so the connection is dropped before it leaves the pod's
+network namespace.
 
-```
-Killed
-```
+**Security Events** → *Network rule violation* — Source `chell-test`,
+Destination `google.com`, Action **Denied**.
 
-Refresh your view in Notifications | Security Events
-
-> 🎯 **Key talking point:** `google.com` was never part of this container's learned behavior. NeuVector has no rule permitting it, so in Protect mode it doesn't get through — full stop. This is east-west and north-south enforcement at the container level, not at the perimeter.
-
-Back in the NeuVector console, navigate to **Notifications** → **Security Events**. You should see a **violation event** with:
-
-- Source: `chell-test`
-- Destination: `google.com`
-- Action: **Denied / Blocked**
-- Timestamp matching your attempt
-
-This is yet another subtle incident.  You can rewrite the rule to allow curl to run "Process profile rule violation by process "curl", and attempt the curl again
-```
-~ # curl google.com
-curl: (56) Recv failure: Connection reset by peer
-```
-Refresh your Security Events and you will now see "Implicit deny rule was violated" - you will need to rewrite that rule, as well.
-
-> You can start to see how granular and subesequently powerful this tool can be.
-
-### Step 9 — Attempt a Second Unauthorized Connection (wget to fastly.com)
-
-Still inside the container, run:
+### Step 9 — `wget` to a **learned** destination → blocked (process rule)
 
 ```bash
-wget https://www.fastly.com 2>&1 | grep subjectAltName
+kubectl exec -n aperture-sci deploy/chell-test -- wget -qO- --timeout=5 https://www.fastly.com
+```
+```
+command terminated with exit code 137
 ```
 
-**Expected result:** This connection is also **blocked**, even though the *destination* (`www.fastly.com`) was in the learned baseline.
+This is the subtle one. The *destination* (`www.fastly.com:443`) is in the
+baseline — but `wget` is a different process from `curl`, and it is not in the
+process profile. NeuVector enforces on **the process making the connection**,
+not just the destination IP.
 
-> 🎯 **Key talking point:** This is the subtle but critical part. `wget` is a *different process* with a *different network behavior signature* than `curl`. NeuVector enforces at the process level — not just destination IP. The allowed rule was built for `curl` making HTTPS connections on a 5-second cycle. `wget` in an interactive shell session doesn't match that profile, so it's denied.
+**Security Events** → *Process profile rule violation by process "wget"*.
 
-> This is how you catch lateral movement and container compromise — an attacker who gains shell access can't just `wget` an exfiltration endpoint or phone home, even if that endpoint was legitimately used by the application itself.
+> 🎯 **Key talking point:** An attacker who lands in this container cannot `wget`
+> an exfil endpoint or phone home — *even to a host the application itself
+> legitimately talks to*. This is how you catch lateral movement and C2 that
+> "lives off the land" on allowed infrastructure.
 
-You should see a second violation event in the NeuVector console for this attempt as well.
+### Step 10 — Optional: the Rewrite-Rule granularity dance
 
-Lets Rewrite Rule for wget and try again.  It still fails (refresh NeuVector and you'll see why: grep was not allow-listed).  Go ahead and rewrite for grep.  
+To show how fine-grained the model is, take the interactive path. First
+allow-list a shell so you can stay inside the container (in a real incident the
+attacker never gets this far — you are deliberately widening the baseline to
+demonstrate):
 
-> Again, you should start to recognize how granular the controls can be - which is effective in mitigating the "unknown" vulnerabilities that might be attempted.
+1. On the `sh` violation from Step 7, click **Rewrite Rule** → review the
+   red-background warning → **Deploy**.
+2. `kubectl exec -it -n aperture-sci deploy/chell-test -- /bin/sh` — now you get
+   a prompt.
+3. From inside: `curl google.com` → still blocked. **Rewrite Rule** the *network*
+   violation → retry → now *"implicit deny rule was violated"* → rewrite that →
+   retry → *`grep` not allow-listed* → rewrite → …
 
-Go ahead and exit the container
-```
-~ # exit
-command terminated with exit code 1
-```
+Each retry surfaces the next-narrowest thing that isn't yet in the baseline.
+
+> 🎯 **Key talking point:** Every allow is explicit and specific — a process, a
+> destination, a port, an application. That granularity is exactly what contains
+> an *unknown* exploit: it can only ever do what the workload already does.
+
+`exit` the shell when done (`command terminated with exit code 1` is expected).
 
 ---
 
-## Part 4: Blocking a Specific Domain
+## Part 4 — Chamber 03: Domain Block (live L7 policy change)
 
-### Step 10a — Confirm Baseline Traffic is Still Flowing
+*Policy lives in NeuVector, not the workload. Change it on a running pod — no
+restart, no redeploy, no manifest edit.*
 
-Before implementing the block, confirm that the automated `curl` loop is still successfully reaching `www.fastly.com`. From a separate terminal (outside the container):
+### Step 11 — Confirm the baseline loop is still flowing
 
 ```bash
-kubectl logs -f $(kubectl get pods -n aperture-sci -o custom-columns=":metadata.name" --no-headers) -n aperture-sci
+kubectl logs -f -n aperture-sci deploy/chell-test
 ```
-
-You should still see the familiar output every ~5 seconds:
-
 ```
 *  subjectAltName: host "www.fastly.com" matched cert's "*.fastly.com"
 ```
 
-> 🎯 **Key talking point:** This is the *currently allowed* baseline. We're about to change that — in real time, with zero restarts or redeployments.
+### Step 12 — Create an address group for `*.fastly.com`
 
-### Step 10b — Create an Address Group for *.fastly.com
-
-Before creating the deny rule, you need a named group that represents the Fastly domain. Navigate to **Policy** → **Groups** and click **Add**.
+**Policy → Groups → Add:**
 
 | Field | Value |
 |-------|-------|
 | **Name** | `fastly-external` |
 | **Criteria** | `address=*.fastly.com` |
 
-Click **Add** to save the group. This gives NeuVector a target it can match by FQDN — without it, any rule targeting `external` would apply to *all* outbound traffic, not just Fastly.
+Without this, a rule targeting `external` would hit *all* outbound traffic, not
+just Fastly.
 
-### Step 10c — Create the Deny Rule
+### Step 13 — Add a Deny rule, to the top
 
-Navigate to **Policy** → **Network Rules** and click **Add To Top**:
+**Policy → Network Rules → Add To Top:**
 
 | Field | Value |
 |-------|-------|
@@ -244,153 +301,122 @@ Navigate to **Policy** → **Network Rules** and click **Add To Top**:
 | **Action** | **Deny** |
 | **Comment** | `Block *.fastly.com` |
 
-> ⚠️ **Order matters.** Using **Add To Top** ensures the Deny rule evaluates before any existing allow rules. NeuVector evaluates rules top-down — the first match wins.
+> ⚠️ **Order matters.** Rules evaluate top-down, first match wins. **Add To Top**
+> puts the Deny ahead of the learned allow.
 
-Click **Deploy** to push the ruleset.
+Click **Deploy**.
 
-### Step 10d — Observe the Block Taking Effect
+### Step 14 — Watch the block take effect
 
-Watch the container logs. Within one cycle (≤5 seconds), the output will stop — or you'll see a connection failure instead of the `subjectAltName` line:
+Within one cycle (≤5 s) the log output stops:
 
 ```bash
-kubectl logs -f $(kubectl get pods -n aperture-sci -o custom-columns=":metadata.name" --no-headers) -n aperture-sci
+kubectl logs -f -n aperture-sci deploy/chell-test
 ```
 
-The loop is still running inside the container — `curl` is still attempting the connection every 5 seconds — but NeuVector is now dropping it before it reaches the network.
+The loop is still running — `curl` still fires every 5 s — but NeuVector now
+drops it. **Security Events** shows a steady stream of **Deny** entries
+(Source `chell-test`, Destination `www.fastly.com`, Port `443`).
 
-In **Notifications** → **Security Events** you should see a stream of **Deny** events:
+> 🎯 **Key talking point:** Enforcement policy changed on a live workload with no
+> restart, no redeploy, and no change to the image or the manifest. The
+> application never knows the enforcement layer exists.
 
-- **Source:** `chell-test`
-- **Destination:** `www.fastly.com`
-- **Port:** `443`
-- **Action:** **Denied**
+### Step 15 — Clean up the block
 
-> 🎯 **Key talking point:** We just changed enforcement policy on a live, running workload with no restart, no redeployment, and no changes to the container image or Kubernetes manifests. The policy lives in NeuVector — independent of the workload. This is the operational model for runtime security: the application doesn't need to know anything about the enforcement layer.
+1. **Policy → Network Rules** — delete `Block *.fastly.com` → **Deploy**.
+2. **Policy → Groups** — delete `fastly-external`.
 
-### Step 10e — Remove the Block Rule (Cleanup)
-
-To restore baseline traffic for the rest of the demo:
-
-1. **Policy** → **Network Rules** — delete the `Block *.fastly.com` deny rule, click **Deploy**
-2. **Policy** → **Groups** — delete the `fastly-external` address group
-
-The `curl` log output will resume within one cycle.
+The log output resumes within one cycle.
 
 ---
 
-## Part 5: WAF (Web Application Firewall) Demo
+## Part 5 — Chamber 04: WAF / Layer 7 payload
 
-NeuVector includes a built-in WAF engine that inspects HTTP/HTTPS payloads at Layer 7 — beyond just "who is talking to whom" and into *what they're saying*. This section demonstrates how WAF rules catch common attack patterns like SQL injection and path traversal, even from within an otherwise-allowed container.
+*Network-allowed is not content-allowed.*
 
-### Step 11 — Create a WAF Sensor
+### Step 16 — Create a WAF sensor
 
-Navigate to **Policy** → **WAF Sensors** and click **Add**.
+**Policy → WAF Sensors → Add:**
 
 | Field | Value |
 |-------|-------|
 | **Name** | `aperture-waf` |
 | **Comment** | `Demo WAF sensor for aperture-sci` |
 
-Once the sensor is created, click into it and click **Add Rule** to define patterns:
+Open it, **Add Rule** twice:
 
-**Rule 1 — SQL Injection:**
-
-| Field | Value |
-|-------|-------|
-| **Name** | `sql-injection` |
-| **Pattern** | `(?i)(union.*select\|select.*from\|'\s*or\s*'1'\s*=\s*'1\|'\s*or\s*1\s*=\s*1)` |
-| **Context** | `url` |
-
-**Rule 2 — Path Traversal:**
-
-| Field | Value |
-|-------|-------|
-| **Name** | `path-traversal` |
-| **Pattern** | `(\.\./\|%2e%2e%2f\|%2e%2e/)` |
-| **Context** | `url` |
-
-Click **Save** to commit the sensor.
-
-> 💡 **Tip:** NeuVector also ships with built-in WAF signatures you can import. The manual rules here are to make the pattern-matching logic visible and auditable.
-
-### Step 12 — Apply the WAF Sensor to the Group
-
-Navigate to **Policy** → **Groups** → `nv.chell-test.aperture-sci`.
-
-Click **WAF** (tab or section within the group detail). Click **Add** and select `aperture-waf`. Set the action to **Alert** first so you can observe before blocking.
-
-Click **Deploy**.
-
-> 🎯 **Key talking point:** WAF sensors are applied per-group, just like policy modes. You can have different WAF postures for different workloads — a front-end service might get full OWASP coverage while an internal metrics scraper gets none. Granularity again.
-
-### Step 13 — Trigger a SQL Injection Alert
-
-Exec into the `chell-test` container:
-
-```bash
-kubectl exec -it $(kubectl get pods -n aperture-sci -o custom-columns=":metadata.name" --no-headers) -n aperture-sci -- /bin/sh
+**`sql-injection`** — Context `url`:
+```
+(?i)(union.*select|select.*from|'\s*or\s*'1'\s*=\s*'1|'\s*or\s*1\s*=\s*1)
 ```
 
-From inside the container, send a request with a SQL injection payload in the URL:
-
-```bash
-curl -sk "https://www.fastly.com/path?id=1%27%20OR%20%271%27%3D%271"
+**`path-traversal`** — Context `url`:
+```
+(\.\./|%2e%2e%2f|%2e%2e/)
 ```
 
-The request may succeed (because the sensor is in **Alert** mode), but navigate to **Notifications** → **Security Events** and you should see a WAF event:
+**Save.**
 
-- **Type:** WAF
-- **Sensor:** `aperture-waf`
-- **Rule:** `sql-injection`
-- **Source:** `chell-test`
-- **Action:** Alert
+### Step 17 — Apply it to the group in Alert
 
-> 🎯 **Key talking point:** The network rule allowed this connection — `fastly.com` on port 443 is in the learned baseline. But the WAF caught what the network rule couldn't: a malicious payload inside the allowed channel. This is the difference between network security and application security.
+**Policy → Groups → `nv.chell-test.aperture-sci` → WAF** → **Add** →
+`aperture-waf`, action **Alert** → **Deploy**.
 
-### Step 14 — Switch WAF to Deny and Verify Blocking
-
-Go back to **Policy** → **Groups** → `nv.chell-test.aperture-sci` → **WAF**. Change the action for `aperture-waf` from **Alert** to **Deny**. Click **Deploy**.
-
-From inside the container, repeat the request:
+### Step 18 — Trigger a SQL-injection alert
 
 ```bash
-curl -sk "https://www.fastly.com/path?id=1%27%20OR%20%271%27%3D%271"
+kubectl exec -n aperture-sci deploy/chell-test -- \
+  curl -sk "https://www.fastly.com/path?id=1%27%20OR%20%271%27%3D%271"
 ```
 
-**Expected result:** The connection is **blocked**. You'll see a failure or no response.
+The request goes through (sensor is in Alert), but **Security Events** shows a
+**WAF** event: sensor `aperture-waf`, rule `sql-injection`, source `chell-test`,
+action **Alert**.
 
-Also test the path traversal rule:
+> 🎯 **Key talking point:** The network rule allowed this — Fastly on 443 is in
+> the baseline. The WAF caught what the network rule can't see: a malicious
+> payload *inside* the allowed channel.
+
+### Step 19 — Switch to Deny and verify
+
+**WAF** tab → change `aperture-waf` action to **Deny** → **Deploy**. Repeat the
+SQLi request, and test traversal:
 
 ```bash
-curl -sk "https://www.fastly.com/../../etc/passwd"
+kubectl exec -n aperture-sci deploy/chell-test -- \
+  curl -sk "https://www.fastly.com/../../etc/passwd"
 ```
 
-Both should be blocked. Return to **Notifications** → **Security Events** — you'll now see **Deny** WAF events for each attempt.
+Both fail now. **Security Events** shows **Deny** WAF events for each.
 
-> 🎯 **Key talking point:** The container is allowed to talk to Fastly — that hasn't changed. But now the *content* of those allowed requests is also policed. An attacker who compromises this container and tries to use it as a pivot for a web-based attack gets stopped by NeuVector, not by a perimeter firewall they might not even reach.
+### Step 20 — WAF cleanup
 
-### Step 15 — WAF Cleanup
-
-Remove the WAF sensor from the group before proceeding:
-
-1. **Policy** → **Groups** → `nv.chell-test.aperture-sci` → **WAF** — remove `aperture-waf`, click **Deploy**
-2. **Policy** → **WAF Sensors** — delete `aperture-waf`
+1. **Policy → Groups → `nv.chell-test.aperture-sci` → WAF** — remove
+   `aperture-waf` → **Deploy**.
+2. **Policy → WAF Sensors** — delete `aperture-waf`.
 
 ---
 
-## Part 6: Closing the Loop
+## Part 6 — Chamber 06: Closing the loop
 
-### Step 16 — Review the Violation Timeline
+### Step 21 — Walk the Security Events timeline
 
-In **Notifications** → **Security Events**, review the violation events side by side. Point out:
+**Notifications → Security Events**, oldest to newest. For each: what was
+attempted (process, destination, protocol, payload), what NeuVector did, and how
+it maps to a real threat — unauthorised egress, C2 callout, exfil, a web-attack
+pivot.
 
-- **What was attempted** (process, destination, protocol, payload)
-- **What action NeuVector took** (blocked)
-- **How this maps to a real threat scenario** — unauthorized outbound connections, potential C2 callout, data exfiltration attempt, web-based attack pivoting
+> 🎯 **Key talking point:** Every allow and every deny is logged with full
+> context — source workload, process, destination, action, timestamp. That is
+> the audit trail an IL4/IL5 review asks for, produced as a side effect of
+> enforcement.
 
-### Step 17 — Optional: Show the Network Graph Differential
+### Step 22 — Optional: network graph differential
 
-Return to **Network Activity**. The attempted (blocked) connections may appear as **red dotted lines** in the network graph — visually distinct from the green allowed connection to Fastly. This gives a clear "what was allowed vs. what was blocked" picture for a non-technical audience.
+**Network Activity** — blocked attempts render as **red dotted lines**, visually
+distinct from the green allowed connection to Fastly. A clear "allowed vs.
+blocked" picture for a non-technical audience.
 
 ---
 
@@ -398,36 +424,51 @@ Return to **Network Activity**. The attempted (blocked) connections may appear a
 
 | Action | Mode | Result |
 |--------|------|--------|
-| `curl fastly.com` (automated loop) | Monitor | ✅ Allowed — observed and logged |
-| Switch to Protect | — | Enforcement enabled, learned rules become policy |
-| `curl fastly.com` (automated loop) | Protect | ✅ Allowed — matches learned baseline |
-| `curl google.com` (interactive) | Protect | 🚫 Blocked — no learned rule exists |
-| `wget fastly.com` (interactive) | Protect | 🚫 Blocked — process signature mismatch |
-| `curl fastly.com?id=SQL_INJECT` | WAF Alert | ⚠️ Allowed but alerted — WAF pattern match |
-| `curl fastly.com?id=SQL_INJECT` | WAF Deny | 🚫 Blocked — WAF enforcement on HTTP payload |
-| `curl fastly.com/../../etc/passwd` | WAF Deny | 🚫 Blocked — WAF path traversal rule |
+| `curl fastly.com` (baseline loop) | Discover / Monitor | ✅ Observed and learned |
+| Switch group to Protect | — | Learned rules become enforced policy |
+| `curl fastly.com` (baseline loop) | Protect | ✅ Allowed — matches the baseline |
+| `kubectl exec … -- /bin/sh` | Protect | 🚫 SIGKILLed (`exit 137`) — process not in profile |
+| `curl google.com` | Protect | 🚫 Blocked — destination never learned (network rule) |
+| `wget fastly.com` | Protect | 🚫 Blocked — process not in profile, though destination *is* learned |
+| Add Deny rule → `*.fastly.com` | Protect | 🚫 Baseline loop stops within 5 s; no workload change |
+| Remove Deny rule | Protect | ✅ Baseline loop resumes within 5 s |
+| `curl 'fastly.com/?id=… OR 1=1'` | WAF Alert | ⚠️ Allowed but alerted — payload matched |
+| `curl 'fastly.com/?id=… OR 1=1'` | WAF Deny | 🚫 Blocked — WAF enforced on the HTTP payload |
+| `curl 'fastly.com/../../etc/passwd'` | WAF Deny | 🚫 Blocked — path-traversal rule |
 
 ---
 
-## Key Takeaways for Your Audience
+## Key Takeaways
 
-**Behavioral baseline, not signature-based.** NeuVector doesn't use CVE signatures to block things. It models what "normal" looks like for each workload and enforces that model. Zero-day exploits that use legitimate-looking processes still get caught.
-
-**Process-level enforcement.** The unit of enforcement isn't IP or port — it's the container process making the connection. This is enforcement inside the pod, before traffic ever hits the network.
-
-**Graduated rollout.** Discover → Monitor → Protect gives operators the ability to build confidence before enforcing. You don't have to choose between blind blocking and total permissiveness.
-
-**Full audit trail.** Every allowed and blocked connection is logged with enough context to reconstruct what happened, when, and from where — directly satisfying audit and compliance requirements for IL4/IL5 environments.
-
-**Layer 7 WAF built in.** NeuVector's WAF engine inspects HTTP payload content — URL parameters, headers, and body — for attack patterns like SQL injection, XSS, and path traversal. This is application-layer protection without a separate appliance, operating inside the cluster on a per-workload basis.
+- **Behavioural, not signature-based** *(claim A)* — NeuVector models what each
+  workload normally does and enforces that. Zero-days built from
+  legitimate-looking processes are still caught.
+- **Graduated rollout** *(claim B)* — Discover → Monitor → Protect lets you build
+  confidence before enforcing. Learned traffic is unaffected when you flip to
+  Protect.
+- **Process-level, inside the pod** *(claim C)* — the unit of enforcement is the
+  container process making the connection, not an IP or port at a perimeter.
+  `wget` is blocked to a host `curl` is allowed to reach.
+- **Policy decoupled from the workload** *(claim D)* — rules, address groups, and
+  WAF sensors live in NeuVector. Change them on a running pod; the app never
+  knows.
+- **Layer 7 built in** *(claim E)* — FQDN egress control and WAF payload
+  inspection, per-workload, with no separate appliance.
+- **Full audit trail** *(claim G)* — every allow and deny logged with source,
+  process, destination, action, and timestamp.
 
 ---
 
 ## References
 
+- [`PLAN.md`](./PLAN.md) — thesis, claims A–G, and the full chamber list.
+- [`00-glossary.md`](./00-glossary.md) — canonical definitions for every term
+  used here.
+- NeuVector Docs — [Modes: Discover, Monitor, Protect](https://open-docs.neuvector.com/policy/modes/)
+  · [Network Rules](https://open-docs.neuvector.com/policy/networkrules/)
+  · [Process Profile Rules](https://open-docs.neuvector.com/policy/processrules/)
+  · [DLP & WAF Sensors](https://open-docs.neuvector.com/policy/dlp/)
 - SUSE — [SUSE Security (NeuVector) documentation hub](https://documentation.suse.com/cloudnative/security/)
-- NeuVector Docs — [Modes: Discover, Monitor, Protect](https://open-docs.neuvector.com/policy/modes/) — the mode model this walkthrough steps through.
-- NeuVector Docs — [Network Rules](https://open-docs.neuvector.com/policy/networkrules/) and [DLP & WAF Sensors](https://open-docs.neuvector.com/policy/dlp/) — the L7 rule and WAF behavior shown in Parts 3–5.
-- SUSE Communities — [Zero Trust Runtime Container Security](https://www.suse.com/c/zero-trust-runtime-container-security/) — the "behavioral baseline, not signatures" idea behind the demo.
-- Video — [Demo: SUSE's NeuVector — Zero Trust Security for Containers](https://www.youtube.com/watch?v=nAyWDhfU97w) · [NeuVector Security Policy Automation for Zero Trust Segmentation and Zero Day Attack Prevention](https://www.youtube.com/watch?v=XMtHWJ3Tv_k)
-- Companion doc: [`Security_Demo_Distroless.md`](./Security_Demo_Distroless.md) · concept notes: [`Security_Discussion.md`](./Security_Discussion.md)
+- SUSE Communities — [Zero Trust Runtime Container Security](https://www.suse.com/c/zero-trust-runtime-container-security/)
+- Companion: [`Security_Demo_Distroless.md`](./Security_Demo_Distroless.md) ·
+  [`Security_Discussion.md`](./Security_Discussion.md)

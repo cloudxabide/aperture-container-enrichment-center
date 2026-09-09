@@ -63,18 +63,20 @@ Core set is **00–05**. 06 is a wrap-up, not a test. 07–08 are stretch.
   Security Events (quiet).
 
 ### Chamber 02 — The Combustible Lemon (interactive attacker, fat image)
-- **Do (in Protect):** `kubectl exec` into the pod, then attempt, in order:
-  1. spawn `/bin/sh` → killed, `exit 137`
-  2. `curl google.com` → blocked (destination never learned)
-  3. `wget https://www.fastly.com` → blocked (**known destination, unknown
-     process**)
-  4. the Rewrite-Rule granularity dance: allow `curl`, retry, hit implicit-deny,
-     allow that, retry, hit `grep` not allow-listed, allow `grep`, …
+- **Do (group stays in Protect):** each attempt is a **single `kubectl exec`**
+  against `deploy/chell-test`, in order:
+  1. `-- /bin/sh` → SIGKILLed, `exit 137` (process not in profile)
+  2. `-- curl google.com` → blocked (destination never learned — network rule)
+  3. `-- wget https://www.fastly.com` → blocked (**known destination, unknown
+     process** — process profile rule)
+- **Then, optional deeper dive:** the interactive Rewrite-Rule granularity dance
+  — allow-list `sh` to stay in the container, then `curl` → implicit-deny →
+  `grep`, deploying a Rewrite Rule at each step. Fiddly to run live;
+  `Scripts/40_attack_fat.sh` fires the discrete-exec sequence on a timer so the
+  presenter can narrate instead of type.
 - **Proves:** A + C — enforcement is on the *process making the connection*, not
   the IP. Catches lateral movement / C2 / exfil even to legitimate destinations.
 - **NV surface:** Security Events; Rewrite Rule dialog; Process Profile Rules.
-- **Note:** the dance is fiddly to run live. `Scripts/40_attack_fat.sh` fires
-  the attempts on a timer so the presenter can narrate instead of type.
 
 ### Chamber 03 — Domain Block (live L7 policy change)
 - **Do:** create address group `fastly-external` (`address=*.fastly.com`); add a
@@ -259,25 +261,32 @@ Rows 3–4 are `env.sh` values. Rows 2 and 5 are documentation notes.
    agent-instruction layer. **(done)**
 2. `docs/00-glossary.md`, `docs/10-setup.md`, `docs/platform-notes/*` (rancher-desktop
    + k3s-k3d / kind / minikube), and move the three `Security_*.md` into `docs/`. **(done)**
-3. `apps/wheatley/` (main.go + Dockerfile) + `manifests/` + `Scripts/00,10,20,30,31`.
+3. `apps/wheatley/` (main.go + Dockerfile) + `manifests/` + `Scripts/00,10,20,30,31`. **(done)**
 4. Reconcile `Security_Demo.md` / `Security_Demo_Distroless.md` against the
    chamber list and the real object names; tighten the order of operations
-   (both docs flag this themselves).
+   (both docs flag this themselves). **(done)**
 5. `Scripts/40_attack_fat.sh` + `Scripts/90_reset_demo.sh`.
 6. Dry-run end-to-end on Rancher Desktop, then a second pass on kind to prove
    the `PLATFORM` switch.
 
 ---
 
-## 9. Known inconsistencies to fix during the build
+## 9. Known inconsistencies — resolved
 
-- `Security_Demo.md` Step 7 shows `exit 137` for `/bin/sh` while the group is
-  already in Protect — the doc's own TODO calls the order of operations loose.
-  Fix the sequencing when folding it into Chamber 02.
-- Both demo docs reference `Scripts/30_deploy_apps.sh` / `31_deploy_distroless.sh`
-  and `env.sh` that do not exist yet — build step 1 and 3 create them.
-- `Security_Demo_Distroless.md` uses `<your-registry>/wheatley-server:latest`
-  with no registry defined — resolved by `DISTROLESS_APP_IMAGE` / `REGISTRY` in
-  `env.sh` and local-load default.
-- No `.gitignore` yet; `env.sh` may contain a registry path or credentials and
-  must be ignored.
+All fixed during build steps 1–4:
+
+- ~~`Security_Demo.md` Step 7 shows `exit 137` for `/bin/sh` while already in
+  Protect — order of operations loose.~~ Chamber 02 now opens explicitly with
+  the group in Protect (carried over from Chamber 01) and the attack sequence is
+  discrete `kubectl exec` calls in a fixed order.
+- ~~Both demo docs reference `Scripts/30…` / `31…` and `env.sh` that don't
+  exist.~~ Those exist (step 3); the docs now link the real files.
+- ~~`Security_Demo_Distroless.md` uses `<your-registry>/wheatley-server:latest`
+  with no registry defined.~~ Replaced with `$DISTROLESS_APP_IMAGE` from `env.sh`
+  + the local-load default; the doc points at `apps/wheatley/` and the manifest.
+- ~~No `.gitignore`.~~ Added (step 1); ignores `env.sh` and `*.local`.
+
+**Still open (needs a live cluster — build step 6):** exact NeuVector 5.4.x
+console wording for the Rewrite Rule dialog, the "implicit deny" event, and the
+ephemeral-container attach event; whether an `exec`'d `/bin/bash` is SIGKILLed
+alongside `/bin/sh`. Flagged in each walkthrough's **Status**.

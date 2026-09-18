@@ -27,7 +27,7 @@ case "$NEUVECTOR_CONSOLE_EXPOSE" in
   port-forward)
     info "Port-forwarding svc/${SVC} — open https://localhost:${PORT}  (login: admin / admin)"
     info "Press Ctrl-C to stop. To background it instead:  Scripts/20_expose_console.sh &"
-    exec kube -n "$NS" port-forward "svc/${SVC}" "${PORT}:8443"
+    kube -n "$NS" port-forward "svc/${SVC}" "${PORT}:8443"
     ;;
 
   nodeport)

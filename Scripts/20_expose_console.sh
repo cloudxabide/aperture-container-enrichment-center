@@ -23,9 +23,28 @@ PORT="$NEUVECTOR_CONSOLE_PORT"
 kube -n "$NS" get svc "$SVC" >/dev/null 2>&1 || \
   die "Service ${SVC} not found in namespace ${NS}. Run Scripts/10_install_neuvector.sh first."
 
+# NeuVector 5.x generates a random admin password on first install and stores
+# it in neuvector-bootstrap-secret; fall back to env.sh's setting if that
+# Secret isn't there (older chart versions default to admin/admin).
+kubectl_cmd="kubectl"
+[[ -n "$KUBE_CONTEXT" ]] && kubectl_cmd="kubectl --context ${KUBE_CONTEXT}"
+retrieve_hint="Retrieve the password again anytime with:
+    ${kubectl_cmd} -n ${NS} get secret neuvector-bootstrap-secret -o go-template='{{ .data.bootstrapPassword|base64decode}}{{ \"\\n\" }}'"
+
+admin_password="$(neuvector_admin_password || true)"
+if [[ -n "$admin_password" ]]; then
+  login_line="Login: admin / ${admin_password}"
+else
+  admin_password="$NEUVECTOR_ADMIN_PASSWORD"
+  login_line="Login: admin / ${admin_password}  (from NEUVECTOR_ADMIN_PASSWORD in env.sh; no bootstrap secret found)"
+  retrieve_hint=""
+fi
+
 case "$NEUVECTOR_CONSOLE_EXPOSE" in
   port-forward)
-    info "Port-forwarding svc/${SVC} — open https://localhost:${PORT}  (login: admin / admin)"
+    info "Port-forwarding svc/${SVC} — open https://localhost:${PORT}"
+    info "$login_line"
+    [[ -n "$retrieve_hint" ]] && info "$retrieve_hint"
     info "Press Ctrl-C to stop. To background it instead:  Scripts/20_expose_console.sh &"
     kube -n "$NS" port-forward "svc/${SVC}" "${PORT}:8443"
     ;;
@@ -35,7 +54,9 @@ case "$NEUVECTOR_CONSOLE_EXPOSE" in
     kube -n "$NS" patch svc "$SVC" -p '{"spec":{"type":"NodePort"}}'
     node_port="$(kube -n "$NS" get svc "$SVC" -o jsonpath='{.spec.ports[0].nodePort}')"
     node_ip="$(kube get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
-    info "Console: https://${node_ip:-<node-ip>}:${node_port}  (login: admin / admin)"
+    info "Console: https://${node_ip:-<node-ip>}:${node_port}"
+    info "$login_line"
+    [[ -n "$retrieve_hint" ]] && info "$retrieve_hint"
     ;;
 
   loadbalancer)
@@ -47,7 +68,9 @@ case "$NEUVECTOR_CONSOLE_EXPOSE" in
       [[ -n "$lb_ip" ]] && break
       sleep 2
     done
-    info "Console: https://${lb_ip:-<pending>}:8443  (login: admin / admin)"
+    info "Console: https://${lb_ip:-<pending>}:8443"
+    info "$login_line"
+    [[ -n "$retrieve_hint" ]] && info "$retrieve_hint"
     ;;
 
   *)

@@ -17,6 +17,7 @@
 #   render_manifest <file> [VAR...] ...  expand ${VAR} refs from env.sh
 #   ensure_namespace <ns>
 #   wait_for_rollout <kind/name> <ns> [timeout]
+#   neuvector_admin_password ......  print the generated admin password, if any
 #   preflight ..........  assert the cluster is reachable
 #   log / info / warn / err / die
 
@@ -157,6 +158,16 @@ wait_for_rollout() {
   local target="$1" ns="$2" timeout="${3:-120s}"
   info "Waiting for ${target} in ${ns} (timeout ${timeout})"
   kube -n "$ns" rollout status "$target" --timeout "$timeout"
+}
+
+# neuvector_admin_password
+#   Print the initial admin password to stdout. NeuVector 5.x generates a
+#   random password on first install and stores it in a Secret; nothing is
+#   printed (exit status non-zero) if that Secret doesn't exist, e.g. on an
+#   older chart version where $NEUVECTOR_ADMIN_PASSWORD is authoritative.
+neuvector_admin_password() {
+  kube -n "$NEUVECTOR_NAMESPACE" get secret neuvector-bootstrap-secret \
+    -o go-template='{{ .data.bootstrapPassword | base64decode }}' 2>/dev/null
 }
 
 # ── Image build & delivery ───────────────────────────────────────────────────

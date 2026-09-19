@@ -54,6 +54,9 @@ Full setup and per-platform notes: [`docs/10-setup.md`](docs/10-setup.md) and
 ## Quickstart
 
 ```bash
+mkdir ~/Developer/Projects; cd $_
+git clone https://github.com/cloudxabide/aperture-container-enrichment-center
+cd aperture-container-enrichment-center
 cp Files/env.sh.example env.sh     # then edit: PLATFORM, KUBE_CONTEXT, NEUVECTOR_CHART_VERSION
 Scripts/00_preflight.sh            # verify cluster reachable + tools present
 Scripts/10_install_neuvector.sh   # helm upgrade --install NeuVector

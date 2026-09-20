@@ -42,11 +42,14 @@ On a fresh `helm upgrade --install`, the `neuvector-enforcer-pod` DaemonSet pod
 can start before the controller's embedded Consul is ready to accept joins.
 You'll see it log `error="No known Consul servers"` / `Failed to locate
 leader`, exit `254`, and get one Kubernetes restart — then come up clean and
-stay up. This is a cold-start race across controller + manager + scanner +
-enforcer all starting together on constrained VM resources, not a config
-problem. `Scripts/10_install_neuvector.sh`'s rollout-status wait normally
-rides through it; if the Enforcer DaemonSet still isn't ready after that
-wait, only then is it worth investigating further (`kubectl -n neuvector logs
+stay up. This is a **startup-ordering race**, not a resource or config
+problem: the chart starts controller + manager + scanner + enforcer
+concurrently with no init-container gate on controller-readiness, so the
+enforcer can lose the race even with CPU/RAM to spare. Extra VM resources
+won't reliably prevent it — don't chase it by resizing the VM.
+`Scripts/10_install_neuvector.sh`'s rollout-status wait normally rides
+through it; if the Enforcer DaemonSet still isn't ready after that wait,
+only then is it worth investigating further (`kubectl -n neuvector logs
 --previous ds/neuvector-enforcer-pod`).
 
 ## Building the `wheatley` image

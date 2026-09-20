@@ -46,7 +46,14 @@ case "$NEUVECTOR_CONSOLE_EXPOSE" in
     info "$login_line"
     [[ -n "$retrieve_hint" ]] && info "$retrieve_hint"
     info "Press Ctrl-C to stop. To background it instead:  Scripts/20_expose_console.sh &"
-    kube -n "$NS" port-forward "svc/${SVC}" "${PORT}:8443"
+    # kubectl port-forward doesn't reconnect on its own — an apiserver
+    # streaming timeout, a manager pod restart, or a network blip kills it
+    # for good. Loop so the console stays reachable through a long demo.
+    while true; do
+      kube -n "$NS" port-forward "svc/${SVC}" "${PORT}:8443" || true
+      warn "port-forward exited — reconnecting in 3s (Ctrl-C to stop)"
+      sleep 3
+    done
     ;;
 
   nodeport)

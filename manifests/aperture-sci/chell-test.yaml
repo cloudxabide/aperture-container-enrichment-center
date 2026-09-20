@@ -24,6 +24,16 @@ spec:
       labels:
         app: chell-test
     spec:
+      # Pin ndots to 1: chell-test only ever looks up external FQDNs
+      # (BASELINE_TARGET_URL, the Chamber 02/03/04 exec targets). Default
+      # ndots:5 makes the resolver try every cluster/host search-domain
+      # suffix before the bare name — on a host whose network hands out its
+      # own search domains (e.g. a home-lab DNS server), a suffixed lookup
+      # can resolve first and silently redirect "external" traffic.
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -44,7 +54,7 @@ spec:
               echo "chell-test baseline loop -> ${BASELINE_TARGET_URL} every ${BASELINE_INTERVAL_SECONDS}s"
               while true; do
                 curl -svo /dev/null "${BASELINE_TARGET_URL}" 2>&1 \
-                  | grep --line-buffered subjectAltName || true
+                  | grep subjectAltName || true
                 sleep "${BASELINE_INTERVAL_SECONDS}"
               done
           securityContext:

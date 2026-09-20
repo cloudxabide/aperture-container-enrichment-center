@@ -79,6 +79,7 @@ source "$ENV_FILE"
 : "${DEBUG_IMAGE:=busybox:1.36}"
 : "${BASELINE_TARGET_URL:=https://www.fastly.com}"
 : "${BASELINE_INTERVAL_SECONDS:=5}"
+: "${ATTACK_STEP_INTERVAL_SECONDS:=8}"
 : "${EICAR_URL:=https://secure.eicar.org/eicar.com.txt}"
 : "${DEMO_HOSTNAME:=}"
 

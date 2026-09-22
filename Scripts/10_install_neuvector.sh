@@ -79,3 +79,5 @@ if [[ "$NEUVECTOR_ADMIN_PASSWORD" != "admin" ]]; then
 fi
 
 info "NeuVector installed — next: Scripts/20_expose_console.sh"
+info "If you need to retrieve the password, run:"
+info "kubectl get secret --namespace neuvector neuvector-bootstrap-secret -o go-template='{{ .data.bootstrapPassword|base64decode}}{{ \"\n\" }}' # retrieve the password"

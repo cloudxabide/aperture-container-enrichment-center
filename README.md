@@ -60,10 +60,11 @@ cd aperture-container-enrichment-center
 cp Files/env.sh.example env.sh     # then edit: PLATFORM, KUBE_CONTEXT, NEUVECTOR_CHART_VERSION
 Scripts/00_preflight.sh            # verify cluster reachable + tools present
 Scripts/10_install_neuvector.sh   # helm upgrade --install NeuVector
-kubectl get secret --namespace neuvector neuvector-bootstrap-secret -o go-template='{{ .data.bootstrapPassword|base64decode}}{{ "\n" }}' # retrieve the password
 Scripts/20_expose_console.sh      # port-forward https://localhost:8443  (admin / admin)
 Scripts/30_deploy_apps.sh         # chell-test  -> aperture-sci   (fat image: nicolaka/netshoot)
 Scripts/31_deploy_distroless.sh   # wheatley    -> aperture-labs  (builds + loads the image)
+# And when you're done...
+Scripts/90_reset_demo.sh	# Resets the demo environment
 ```
 
 `20_expose_console.sh` runs in the foreground — background it (`&`) or use a

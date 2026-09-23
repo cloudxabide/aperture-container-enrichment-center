@@ -78,6 +78,7 @@ if [[ "$NEUVECTOR_ADMIN_PASSWORD" != "admin" ]]; then
   warn "NEUVECTOR_ADMIN_PASSWORD is set but this script does not apply it. Log in as admin/admin and change the password on first login."
 fi
 
-info "NeuVector installed — next: Scripts/20_expose_console.sh"
+info "NeuVector installed — next: "
+info "Scripts/20_expose_console.sh &"
 info "If you need to retrieve the password, run:"
 info "kubectl get secret --namespace neuvector neuvector-bootstrap-secret -o go-template='{{ .data.bootstrapPassword|base64decode}}{{ \"\n\" }}' # retrieve the password"
